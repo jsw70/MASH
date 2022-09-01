@@ -1,0 +1,471 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r loading packages, include=FALSE}
+
+##This script creates the raw data per individual using only data that has valid lux data
+##the reason for doing this is because a lot of these people have valid lux data 
+##and that the amount of effort it would take to add non-lux data would far outweigh the gain
+
+library(stringr)
+library(tidyverse)
+library(lubridate)
+library(haven)
+library(data.table)
+library(PhysicalActivity)
+library(imputeTS)
+
+working_dir="L:/SWAN/data analysis/Analyst Folders/JF/projects/actigraphy/Colvin_5_21_2021/scripts/github/"
+
+current_date=read.csv(paste(working_dir,"current_date_reference_tag.csv",sep=""))
+
+current_date=current_date[,1]
+
+library(reticulate)
+use_virtualenv("H:/cnn_10_8_2021/",required=TRUE)
+
+
+```
+
+```{r }
+##this function :
+#1)creates the new 'wake-sleep' periods to be inputs for the model
+#2) creates the 'till wakeup' and 'till fallasleep' continuous dependent variables for the mtl structure
+#3) imputes short bursts of missing actiwatch data and 
+#4) creates wearing/non-wearing estimates using the Choi algorithm
+
+date_extend_fct=function(i,df,dff){  
+  datt=df %>% left_join(dff %>% 
+                          filter(REAL_DATE==i) %>% 
+                          select(ID,MIN_TS,MAX_TS),
+                        by=c("ID"))
+  
+  ## 1) and 2) above################################################
+  datt=datt %>% filter(TimeStamp>=MIN_TS & TimeStamp<=MAX_TS) %>% 
+    mutate(REAL_DATE_EXT=as.character(i),
+           PREV_SRT_ALT=unique(PREV_SRT[REAL_DATE==i]),
+           PREV_END_ALT=unique(PREV_END[REAL_DATE==i]),
+           SLPITSRT15_ALT=unique(SLPITSRT15[REAL_DATE==i]),
+           VM=sqrt((Axis1)^2+(Axis2)^2+(Axis3)^2),
+           TILL_WAKEUP=as.numeric(difftime(PREV_END_ALT,TimeStamp,units="mins")),
+           TILL_FALLASLEEP=as.numeric(difftime(SLPITSRT15_ALT,TimeStamp,units="mins")))
+  
+  
+  #3) above ###############################################
+  datt=datt %>% mutate(across(c("Activity","WhiteLight"),
+                              ~ifelse(is.na(.x)==TRUE,1,0),
+                              .names="{col}_MISSING"))
+  
+  
+  ff=rle(datt$Activity_MISSING)
+  
+  activity_missing_df<<-rbind(activity_missing_df,
+                              data.frame(ID=unique(datt$ID),
+                                         REAL_DATE_EXT=as.character(i),
+                                         NUM_RUNS=sum(c(ff$values)),
+                                         LONGEST_RUN=max(c(ff$lengths)*c(ff$values))))
+                              
+  gg=rle(datt$WhiteLight_MISSING)     
+
+  whitelight_missing_df<<-rbind(whitelight_missing_df,
+                              data.frame(ID=unique(datt$ID),
+                                         REAL_DATE_EXT=as.character(i),
+                                         NUM_RUNS=sum(c(gg$values)),
+                                         LONGEST_RUN=max(c(gg$lengths)*c(gg$values))))
+                              
+  datt=datt %>% mutate(across(c("Activity","WhiteLight"),~na_ma(.x,k=4,weighting="simple"))) %>%
+    select(-Activity_MISSING,-WhiteLight_MISSING)
+                     
+  #####################################################################                                 
+  #4)  above   
+  datt=tibble(wearingMarking(dataset=data.frame(datt), 
+           frame=90,
+           perMinuteCts=1,
+           TS="TimeStamp",
+           cts="VM",
+           allowanceFrame=2,
+           newcolname="wearing")) %>% 
+    select(-Date,-Time)
+  
+  return(datt)}
+
+
+##########################################################################
+##########################################################################
+##################################################################################
+################################################################################
+#set folder where the raw actigraphy files are stored
+folder_loc=paste(working_dir,"temp_raw_data/",sep="")
+
+folder_name=substr(folder_loc,
+                   data.frame(str_locate_all(folder_loc,"/")[[1]])$end[length(data.frame(str_locate_all(folder_loc,"/")[[1]])$end)-1]+1,
+                   data.frame(str_locate_all(folder_loc,"/")[[1]])$end[length(data.frame(str_locate_all(folder_loc,"/")[[1]])$end)]-1)
+
+#get a list of files
+files=list.files(folder_loc,pattern=".csv")
+
+#########################################################################
+#########################################################################
+## set folder where actiwatch files are stored
+
+folder_loc_lux=paste(working_dir,"temp_raw_data_w_lux/",sep="")
+
+
+folder_name_lux=substr(folder_loc_lux,
+                       data.frame(str_locate_all(folder_loc_lux,"/")[[1]])$end[length(data.frame(str_locate_all(folder_loc_lux,"/")[[1]])$end)-1]+1,
+                       data.frame(str_locate_all(folder_loc_lux,"/")[[1]])$end[length(data.frame(str_locate_all(folder_loc_lux,"/")[[1]])$end)]-1)
+
+#get a list of files
+files_lux=list.files(folder_loc_lux,pattern=".csv")
+#########################################################################################
+letter_space="[[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ ]]"
+
+num_criteria = "[[:digit:]]+"
+
+##load in diary summary
+##for a template of what the diary summary looks like please refer to the folder 'data examples'
+diary_dates=tibble(read.csv(paste("diary_summary.csv",sep="")))
+
+#load the functions that create the header data (saves time for the optimization)
+source(paste(working_dir,"header_script_for_github_7_13_2022.R",sep=""))
+
+##################################################################################
+##################################################################################
+header_dat=do.call("rbind",
+                   lapply(seq(from=1,
+                              to=length(files),
+                              by=1),
+                          header_fct))
+
+header_dat=header_dat %>% left_join(y=diary_dates %>%
+                                      mutate(ID=as.character(ID),
+                                             across(c("STARTWAT","STOPWAT","STARTMON","STOPMON"), ~as.Date(.x,format="%m/%d/%Y"))) %>%
+                                      select(ID,VISIT,STARTWAT,STOPWAT,STARTMON,STOPMON,TRNDT,SITE_ID),
+                                    by="ID")
+
+
+
+##load in the 'uncorrected' join of sleep-wake data
+## we do this to keep only the data that was joined with valid diary data proceeding and preceding the day in question
+
+interval_dat=tibble(readRDS("L:/SWAN/data analysis/Analyst Folders/JF/projects/actigraphy/Colvin_5_21_2021/data/raw_data/JF_processed/tier_1_done/TIER_1_2022-05-05.Rda"))
+
+interval_dat = interval_dat  %>% mutate(REAL_DATE=as.Date(STRDATE_ALT,format="%Y-%m-%d"),
+                              PREV_END=as.POSIXct(PREV_END,tz="GMT"),
+                              SLPITSRT15=as.POSIXct(SLPITSRT15,tz="GMT"))
+
+interval_short=tibble(interval_dat) %>% select(ID,NEW_DAY_CALC,REAL_DATE,
+                                     STARTING,PREV_END,PREV_SRT,SLPITSRT15,SLPITEND15,DISREGARD_SLEEP,
+                                     INTERVAL_CAT_ALT) %>% filter(INTERVAL_CAT_ALT %in% c("1"))
+
+interval_short =interval_short %>% mutate(TAG=paste(ID,REAL_DATE,sep="_"))
+
+
+###loop for writing individualized data chunks################################
+
+
+###############################################################################
+##create empty datasets to be filled with a loop
+##these datasets will be filled with summary info regarding the individual files
+date_id_df=data.frame(ID=1,REAL_DATE_EXT="1",NROWS=0,LUX_EXCL_SUM=0)
+
+activity_missing_df=tibble(data.frame(ID="1",REAL_DATE_EXT="1",
+                                      NUM_RUNS=0,LONGEST_RUN=0))
+
+whitelight_missing_df=tibble(data.frame(ID="1",REAL_DATE_EXT="1",
+                                        NUM_RUNS=0,LONGEST_RUN=0))
+
+######################3
+
+##create raw data to be using for learning/testing the 1D CNN
+
+##first create a place to save the data
+
+
+subDir=paste("raw_data_for_1D_CNN_",current_date,sep="")
+dir.create(file.path(working_dir, subDir))
+
+for (i in 1:length(files)){
+
+  filename=paste(folder_loc,files[i],sep="")
+
+  id_location=max(data.frame(str_locate_all(filename,"/")[[1]])$end)
+
+  # idddd<<-substr(filename,id_location+1,(id_location+7))
+
+  iddd=substr(filename,id_location+1,(id_location+7))
+
+  lux_filename=c(files_lux)[str_detect(files_lux,iddd)]
+  
+  ##only do this if there valid lux data
+  ######################################################################
+  
+  if (length(lux_filename)>0) {
+
+  dat=tibble(read.csv(filename,skip=10,colClasses=c(rep("integer",9)))) %>%
+    mutate(ID=iddd) %>%
+    left_join(y=header_dat,
+              by="ID") %>%
+    mutate(START_DATE=as.Date(START_DATE,format="%m/%d/%Y"))
+
+  header_check=readLines(paste(folder_loc_lux,
+                  lux_filename,
+                  sep=""),n=40)
+  
+ lux_data_begin=max(setdiff(seq(from=1,to=40), seq(from=1,to=40)[str_detect(header_check,"")]))
+  
+  dat_lux=tibble(read.csv(paste(folder_loc_lux,
+                                lux_filename,
+                                sep=""),skip=lux_data_begin-2))
+  
+  dat_lux =dat_lux%>%
+    rename_at(colnames(dat_lux),
+                  ~str_replace_all(.x,'[.]','')) %>% 
+    select(Date,Activity,WhiteLight,SWStatus,Time) %>%
+    mutate(ID=iddd,
+           Date=as.Date(Date,format="%m/%d/%Y"),
+           TimeStamp=as_datetime(paste(Date,Time, sep=" ")))%>% 
+    relocate(ID)
+  
+  dat_lux=dat_lux %>% mutate(across(c("WhiteLight","Activity"),
+                                    ~ifelse(.x=='.',0,.x)))
+  
+  #create TimeStamps
+  dat=dat%>%
+    mutate(EPOCH_CUM=cumsum(EPOCH_CUM)-1,
+           TimeStamp=as.POSIXct(as.character((START_DT + dminutes(EPOCH_CUM))),tz="GMT"),
+           REAL_DATE=date(TimeStamp))
+  
+  dat=dat %>% rename_at(colnames(dat),
+                        ~str_replace_all(.x,'[.]',''))
+
+  #limit data to dates when actigraph was worn
+  dat=dat %>%filter(REAL_DATE>=STARTMON & REAL_DATE<=STOPMON)
+
+  dat=dat %>% select(ID,TimeStamp,Axis1,Axis2,Axis3,REAL_DATE) %>% 
+    relocate(ID)
+  
+  #join actigraph and actiwatch data
+  dat=dat %>% left_join(dat_lux,
+                         by=c("ID","TimeStamp"))
+  
+  ##concatenate ID and date as a primary key to simplify future loops
+  ##this isn't necessary but I like to do it
+  dat= dat %>% mutate(TAG=paste(ID,REAL_DATE,sep="_"))
+  
+  dat=dat %>% left_join(interval_short %>% 
+                           select(ID,TAG,PREV_END,PREV_SRT,
+                                  SLPITSRT15,INTERVAL_CAT_ALT,SLPITEND15),
+            by=c("TAG","ID"))
+  
+  ##this is done to capture centered window and 15 minutes before wakeup/fallasleep
+  dat_ref=distinct(dat %>% filter(INTERVAL_CAT_ALT=="1") %>%
+    group_by(ID,REAL_DATE) %>%
+    summarize(MIN_TS=as_datetime(PREV_SRT)-(65*60),
+              MAX_TS=as_datetime(SLPITEND15)+(65*60),
+              .groups="keep") %>%
+    ungroup())
+  
+  
+  realdts=sort(unique((dat %>% filter((INTERVAL_CAT_ALT==1) ))$REAL_DATE))
+  
+  
+  new_dat=bind_rows(lapply(realdts,date_extend_fct,df=dat,dff=dat_ref)) 
+  
+  if (nrow(new_dat)>0) {
+        
+    new_dat=new_dat %>% mutate(LUX_EXCL=ifelse(SWStatus=="EXCLUDED",1,0))
+    
+   ##get a summary of the number of days excluded because of invalid actiwatch data
+
+    date_id_df=rbind(date_id_df,
+                     new_dat %>% group_by(ID,REAL_DATE_EXT) %>%
+                       summarize(NROWS=n(),
+                                 LUX_EXCL_SUM=sum(LUX_EXCL),
+                                 .groups="keep") %>%
+                       ungroup())
+    
+    #dates to drop because of invalid actiwatch data
+    drop_dates=sort(unique((new_dat %>% filter(SWStatus =='EXCLUDED'))$REAL_DATE_EXT))
+    
+    new_dat=new_dat %>% filter(!REAL_DATE_EXT %in% c(drop_dates))
+    
+    if (nrow(new_dat)>0){
+    
+    #this variable is included to make sure that the filtering occurred correctly
+    
+    saveRDS(new_dat,
+            paste(working_dir,"raw_data_for_1D_CNN_",current_date,"/",iddd,".RDS",sep=""))
+  
+    }
+    else {print(paste(iddd, " removing invalid lux leaves no data",sep=""))}}
+  else {
+    print(paste(iddd," do nothing, no valid data at all")) } 
+  }
+ 
+
+  else { 
+    "not in lux data"}
+  } 
+
+########################################################################
+
+saveRDS(date_id_df %>% filter(ID != "1"),
+        paste(working_dir,"date_id_df_for_building_1D_CNN_",current_date,".RDS",sep=""))
+
+saveRDS(activity_missing_df %>% filter(ID != "1"),
+        paste(working_dir,"activity_missing_for_building_1D_CNN_",current_date,".RDS",sep=""))
+
+saveRDS(whitelight_missing_df %>% filter(ID != "1"),
+        paste(working_dir,"whitelight_missing_for_building_1D_CNN_",current_date,".RDS",sep=""))
+
+
+
+```
+
+
+``` {python saving RDS to pkl for modeling building}
+import pandas as pd
+import stats
+import os
+from datetime import date
+import pathlib
+from os import listdir
+from os.path import isfile, join
+
+working_dir=r.working_dir
+current_date=r.current_date
+
+newpath = working_dir+"raw_data_for_1D_CNN_"+current_date+"/"+ 'pickles/' 
+if not os.path.exists(newpath):
+    os.makedirs(newpath)
+
+ids = [f for f in listdir(working_dir+"raw_data_for_1D_CNN_"+current_date+"/") if isfile(join(working_dir+"raw_data_for_1D_CNN_"+current_date+"/", f))]
+
+for i in ids:
+    df = r.readRDS(working_dir+'raw_data_for_1D_CNN_'+current_date+'/'+i)
+    df = pd.DataFrame(df)
+    df.to_pickle(working_dir+'raw_data_for_1D_CNN_'+current_date+'/pickles/' +i.replace('.RDS','')+'.pkl')
+    
+exit
+
+```
+
+```{python creating learn,cv,test sets and saving scales}
+
+
+import pandas as pd
+import stats
+import sklearn
+import numpy as np
+import datetime
+from datetime import date
+import numpy.lib.stride_tricks as stride
+from sklearn import metrics
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import RobustScaler
+import os 
+import stats
+import sys
+from importlib import reload 
+import pickle
+import joblib
+import pathlib
+from os import listdir
+from os.path import isfile, join
+
+working_dir=r.working_dir
+
+current_date=pd.read_csv(working_dir + 'current_date_reference_tag.csv')['x'].iloc[0]
+
+##############################################################################
+####################################################################################
+##with lux ######################
+##############################################################################
+
+chunk_by_id=working_dir+"raw_data_for_1D_CNN_"+current_date+"/" 
+
+pklfiles = [f for f in listdir(chunk_by_id+'pickles') if isfile(join(chunk_by_id,'pickles', f))]
+
+raw=pd.DataFrame()
+for i in pklfiles: 
+    raw_temp=pd.read_pickle(chunk_by_id +'pickles/'+i)
+    raw=raw.append(raw_temp,ignore_index=True)
+
+
+len(raw[raw.Activity.isna()==True].ID.unique())
+raw=raw[raw.SLPITEND15.isna()==False][['ID','REAL_DATE','REAL_DATE_EXT','Axis1','Axis2','Axis3','Activity','WhiteLight','wearing','TILL_WAKEUP','TILL_FALLASLEEP','VM','LUX_EXCL']]
+raw.loc[:,'TAG']=raw.ID+'_'+raw.REAL_DATE_EXT
+
+##########################################################
+pathlib.Path(r.working_dir+'python_batch_iteration_data/set_assignment_'+current_date+'/').mkdir(parents=True, exist_ok=True) 
+
+working_dir='L:/SWAN/data analysis/Analyst Folders/JF/projects/actigraphy/Colvin_5_21_2021/scripts/github/python_batch_iteration_data/set_assignment_'+current_date+'/'
+####################################################################
+
+#####figure out id groupings beforehand
+
+id_df=raw[['ID']].drop_duplicates()
+
+x_train_ph,x_test_id=train_test_split(id_df,test_size=0.25,train_size=0.75)
+
+x_train_id,x_val_id=train_test_split(x_train_ph,test_size=0.25,train_size=0.75)
+
+x_train_id.shape
+x_val_id.shape
+x_test_id.shape
+
+###########################################################################################
+##label groups
+
+conditions = [
+    (id_df.ID.isin(x_train_id.ID)),
+    (id_df.ID.isin(x_test_id.ID)),
+    (id_df.ID.isin(x_val_id.ID))
+]
+
+choices = ['TRAIN','TEST','VAL']
+
+id_df.loc[:,'GROUP'] = np.select(conditions, choices, default=np.nan)
+
+id_df.to_pickle(working_dir + 'sa_'+current_date+'.pkl')
+
+raw=pd.merge(raw,id_df,how='inner',on=['ID'])
+
+raw.loc[:,'WhiteLight']=raw.WhiteLight.astype(float)
+raw.loc[:,'Activity']=raw.Activity.astype(float)
+
+raw.loc[:,'wearing']=np.where(raw.wearing=='w',1,0)
+
+raw.groupby('wearing').wearing.count()
+
+#####################################################################################
+
+##SAVE STD_SCALE
+####EMBED THE NORMALIZATION PROCESS INTO THE DATA GENERATION CLASS
+
+#np.save('exclude_tags',exclude_tags)
+
+mm_axis1_scaler=sklearn.preprocessing.MinMaxScaler().fit(raw[(raw.GROUP=='TRAIN')][['Axis1']])
+joblib.dump(mm_axis1_scaler, working_dir + 'mm_axis1_scaler.save') 
+
+mm_axis2_scaler=sklearn.preprocessing.MinMaxScaler().fit(raw[(raw.GROUP=='TRAIN')][['Axis2']])
+joblib.dump(mm_axis2_scaler, working_dir+'mm_axis2_scaler.save') 
+
+mm_axis3_scaler=sklearn.preprocessing.MinMaxScaler().fit(raw[(raw.GROUP=='TRAIN')][['Axis3']])
+joblib.dump(mm_axis3_scaler,working_dir + 'mm_axis3_scaler.save') 
+
+mm_activity_scaler=sklearn.preprocessing.MinMaxScaler().fit(raw[(raw.GROUP=='TRAIN')][['Activity']])
+joblib.dump(mm_activity_scaler,working_dir + 'mm_activity_scaler.save') 
+
+mm_whitelight_scaler=sklearn.preprocessing.MinMaxScaler().fit(raw[(raw.GROUP=='TRAIN')][['WhiteLight']])
+joblib.dump(mm_whitelight_scaler,working_dir + 'mm_whitelight_scaler.save') 
+
+
+exit
+
+```

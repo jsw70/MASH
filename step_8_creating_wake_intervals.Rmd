@@ -1,0 +1,939 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(stringr)
+library(reticulate)
+library(haven)
+library(lubridate)
+library(data.table)
+library(PhysicalActivity)
+library(ggplot2)
+library(RcppRoll)
+library(zoo)
+library(foreign)
+library(haven)
+options(dplyr.width = Inf)
+library(imputeTS)
+
+working_dir="L:/SWAN/data analysis/Analyst Folders/JF/projects/actigraphy/Colvin_5_21_2021/scripts/github/"
+
+
+current_date=read.csv(paste(working_dir,"current_date_reference_tag.csv",sep=""))
+
+library(reticulate)
+use_virtualenv("H:/cnn_10_8_2021/",required=TRUE)
+
+pd=import("pandas")
+
+```
+
+
+```{r  }
+
+##this is used for sampling from the bivariate distribution that was created to account for the fact that the model
+##might be confusing removing the waistband as falling asleep
+diff_sample_fct=function(obj,i){
+  
+  xvals=obj[["x"]]
+  yvals=obj[["y"]]
+  zvals=obj[["z"]]
+  
+  index_num=which.min(abs(c(xvals) - i))
+  
+  sample(yvals,size=1,prob=c(zvals[index_num,]))
+}
+
+
+#######################################
+
+##load in youden info
+youden_with_lux=readRDS(paste(working_dir,"pred_date_",current_date,"/youden_with_lux.RDS",sep=""))
+
+youden_without_lux=readRDS(paste(working_dir,"pred_date_",current_date,"/youden_without_lux.RDS",sep=""))
+
+##loading the epoch-level predictions
+
+final_predictions=tibble(pd$read_pickle(paste(working_dir,"pred_date_",current_date,'/final_predictions_',current_date,'.pkl',sep="")))
+
+##for some reason the date keeps on being converted to an integer, this fixes that
+
+final_predictions=final_predictions %>% 
+  mutate(REAL_DATE_EXT_TEST=as.character(as.Date(as.numeric(REAL_DATE_EXT),origin="1970-01-01")))
+
+final_predictions=final_predictions %>% mutate(TimeStamp=as_datetime(TimeStamp,tz="UTC"),
+                                               MIN_TS=as_datetime(MIN_TS,tz="UTC"),
+                                               MAX_TS=as_datetime(MAX_TS,tz="UTC"))
+
+final_predictions=final_predictions %>% 
+  mutate(TAG=paste(ID,REAL_DATE_EXT_TEST,sep="_"))
+
+##this applies the youden cutpoints.  These cutpoints were determined separately. 
+####for more info on this please refer to the documentation regarding the model creation/validation
+final_predictions=final_predictions %>% mutate(
+                            PRED_CLASS_YOUDEN=ifelse(PREDICTION_CATEGORY=="WITH_LUX_DATA",
+                                               youden_with_lux$optimal_cutpoint,
+                                               ifelse(PREDICTION_CATEGORY=="WITHOUT_LUX_DATA",
+                                                      youden_without_lux$optimal_cutpoint,
+                                                      "wtf")),
+                             PRED_CLASS=ifelse(PRED_AWAKE>=PRED_CLASS_YOUDEN,1,0))
+
+
+#the following dataset should have zero rows, if it doesn't something went wrong
+
+final_predictions %>% group_by(ID,TAG) %>% 
+  summarize(COUNT=length(unique(PREDICTION_CATEGORY)),
+            .groups="keep") %>% 
+  filter(COUNT>1)
+
+##################
+
+##this loads a version of the activity data and the interval daa
+###currently these files are hardcoded to what was used for writing the paper.
+###if you have a more current version of the activity data please update this code
+
+activity_dat=tibble(readRDS(paste(working_dir, "raw_data_processed_",current_date,"/processed_activity_data_",current_date,".Rda",sep="")))
+
+activity_dat = activity_dat %>% mutate(TAG=paste(ID,REAL_DATE,sep="_"))
+
+activity_index=tibble(readRDS(paste(working_dir, "pred_date_",current_date,'/activity_index.RDS',sep='')))
+
+activity_index=activity_index %>% group_by(ID) %>% mutate(TAG=paste(ID,REAL_DATE,sep="_"),
+                                         MAX_REAL_DATE=max(REAL_DATE),
+                                         MIN_REAL_DATE=min(REAL_DATE)) %>%
+  ungroup()
+
+activity_index=activity_index %>% mutate(BEGINNING=ifelse(REAL_DATE==MIN_REAL_DATE,1,0),
+                                         ENDING=ifelse(REAL_DATE==MAX_REAL_DATE,1,0))
+
+cat_dat=tibble(readRDS(paste(working_dir,"raw_data_processed_",current_date,"/TIER_1_",current_date,".Rda",sep="")))
+
+cat_dat = cat_dat  %>% mutate(REAL_DATE=as.Date(STRDATE_ALT,format="%Y-%m-%d"),
+                              TAG=paste(ID,REAL_DATE,sep="_"))
+
+###########################
+
+diary_correction=cat_dat %>% 
+  filter(!TAG %in% c(activity_index %>% filter(PRED_KEEP==0) %>%
+                     pull(ID)))
+
+diary_correction=diary_correction %>% left_join(activity_dat %>% select(TAG,MIN_WEARING,MAX_WEARING),
+                                                by="TAG")
+
+diary_correction=diary_correction %>% left_join(activity_index %>% select(TAG,BEGINNING,ENDING,
+                                                                          OBSMIN),
+                                                by="TAG")
+
+diary_correction=diary_correction %>% 
+  mutate(PREV_END_ALT=as_datetime(ifelse(is.na(PREV_END)==TRUE & BEGINNING==1,
+                                         MIN_WEARING,
+                                         PREV_END)),
+         SLPITSRT15_ALT=as_datetime(ifelse(ENDING==1 & DISREGARD_SLEEP==1,
+                                       MAX_WEARING,
+                                       SLPITSRT15)))
+
+diary_correction =diary_correction %>% 
+  mutate(NEW_OBSMIN=as.numeric(difftime(SLPITSRT15_ALT,PREV_END_ALT,units="mins")),
+         OBSMIN_DIFF=OBSMIN-NEW_OBSMIN,
+         DIARY_CORRECTION_SIZE=pmax(0,OBSMIN_DIFF))
+
+########################################################
+###################################################################
+###################################################################
+###############################################################
+
+ids=sort(unique(final_predictions$TAG))
+
+
+## this is a list that will contain all of the interval predictions
+##later the list will be converted to a dataframe
+pred_list=list()
+
+run_overview_list=list()
+
+##this is a data frame that will contain all of the instances where a person did not go to sleep for the day
+nosleep_df=data.frame(ID="1",
+                      REAL_DATE_EXT=as.Date("2000-02-25",format="%Y-%m-%d"))
+
+###############
+##this table acts as a 'placeholder' to make sure that the current wake interval being determined doesn't overlap with the previous one
+
+temp_final=diary_correction %>% select(ID,
+                                       TAG,
+                                       REAL_DATE_EXT_TEST=REAL_DATE,
+                                       PREDICTED_WAKEUP=PREV_END_ALT,
+                                       PREDICTED_FALLASLEEP=SLPITSRT15_ALT,
+                                       INTERVAL_CAT_ALT,
+                                       BEGINNING) %>%
+  mutate(REAL_DATE_JOINER=REAL_DATE_EXT_TEST + days(1),
+         REAL_DATE_JOINER=as.character(REAL_DATE_JOINER),
+         REAL_DATE_EXT_TEST=as.character(REAL_DATE_EXT_TEST)) %>% 
+  filter(INTERVAL_CAT_ALT=="1" | (BEGINNING==1 & INTERVAL_CAT_ALT !="4")) %>% 
+  select(-INTERVAL_CAT_ALT,-BEGINNING)
+
+
+##this loop creates the intervals over all values in the 'ids' object
+
+for (i in ids) {
+  
+  datt=final_predictions %>% filter(TAG==i)
+  
+  datt=datt %>% left_join(temp_final %>% select(ID,PREV_WAKEUP=PREDICTED_WAKEUP,
+                                                PREV_FALLASLEEP=PREDICTED_FALLASLEEP,
+                                                REAL_DATE_EXT_TEST=REAL_DATE_JOINER),
+                               by=c("ID","REAL_DATE_EXT_TEST"))
+  
+  datt=datt %>% mutate(PREV_FALLASLEEP=as_datetime(ifelse(is.na(PREV_FALLASLEEP)==TRUE,MIN_TS,PREV_FALLASLEEP)))
+  
+  datt=datt %>% filter(TimeStamp>PREV_FALLASLEEP)
+  
+  
+  datt=datt%>%
+    mutate(PRED_LAG=lag(PRED_CLASS),
+           PRED_SEQ=ifelse(PRED_LAG!=PRED_CLASS,1,0),
+           PRED_SEQ=ifelse(is.na(PRED_SEQ)==TRUE,0,PRED_SEQ),
+           PRED_SEQ=cumsum(PRED_SEQ),
+           PRED_SEQ=paste(PRED_CLASS,PRED_SEQ,sep="_"))
+
+  run_overview=tibble(data.frame(values=rle(datt$PRED_SEQ)$values,
+                                 lengths=rle(datt$PRED_SEQ)$lengths))%>%
+    mutate(RUN_CLASS=substr(values,1,1),
+           CUM_MULT1=lengths*as.numeric(RUN_CLASS),
+           CUM_MULT2=cumsum(CUM_MULT1),
+           CUM_MULT=max(CUM_MULT2),
+           CUM_TOT=cumsum(lengths),
+           ZERO_TOT=max(CUM_TOT-CUM_MULT),
+           UNDERSCORE=str_locate(values,"_")[,"start"],
+           REF_NUM=substr(values,UNDERSCORE+1,nchar(values)))
+  
+  
+  if (nrow(run_overview)<=1) {
+    
+    
+    nosleep_df=rbind(nosleep_df,
+                     data.frame(ID=unique(datt$ID),
+                                REAL_DATE_EXT=unique(datt$REAL_DATE_EXT_TEST)))
+    
+  }
+  
+  else {
+  
+  run_ov_awake=run_overview%>%
+    filter(RUN_CLASS==1) %>%
+    mutate(CUM_TOT_PREV=lag(CUM_TOT),
+           CUM_TOT_PREV=ifelse(is.na(CUM_TOT_PREV)==TRUE,0,CUM_TOT_PREV),
+           INTERVAL_LEN=CUM_TOT-CUM_TOT_PREV,
+           RANKING=seq(from=1,to=n()),
+           INTERVAL_DIFF=INTERVAL_LEN-lengths)
+  
+  run_ov_asleep=run_overview%>%
+    filter(RUN_CLASS==0) %>%
+    mutate(RANKING=seq(from=1,to=n()))
+  
+  grid_ref=tibble(expand.grid(c(run_ov_awake$RANKING),
+                              c(run_ov_awake$RANKING)))
+  
+  grid_ref=grid_ref %>% filter(Var1<=Var2)
+  
+  awake_perc=c()
+  sleep_perc=c()
+  
+  for (j in seq(from=1,to=dim(grid_ref)[1],by=1)){
+    awake_perc=c(awake_perc,sum(run_ov_awake$lengths[grid_ref$Var1[j]:grid_ref$Var2[j]]) /
+                   unique(run_overview$CUM_MULT))
+    
+    sleep_perc=c(sleep_perc,sum((run_ov_asleep %>% filter(!REF_NUM %in% seq(from=run_ov_awake$REF_NUM[grid_ref$Var1[j]],
+                                                                            to=run_ov_awake$REF_NUM[grid_ref$Var2[j]],
+                                                                            by=1)))$lengths)/
+                   unique(run_ov_asleep$ZERO_TOT))
+  }
+  
+  grid_ref=grid_ref %>% mutate(SLEEP_PERC=sleep_perc,
+                               AWAKE_PERC=awake_perc,
+                               NUM_TEST=2-(SLEEP_PERC+AWAKE_PERC),
+                               MIN_NUM_TEST=min(NUM_TEST))
+  
+  grid_ref=grid_ref %>% filter(NUM_TEST==MIN_NUM_TEST)
+  
+  #
+  if (nrow(grid_ref)>1) {  
+    grid_ref=grid_ref %>% mutate(MAX_AWAKE_PERC=max(AWAKE_PERC)) %>%
+      filter(AWAKE_PERC==MAX_AWAKE_PERC)
+    }
+  
+  min_seq=run_ov_awake$values[grid_ref$Var1]
+  
+  max_seq=run_ov_awake$values[grid_ref$Var2]
+  
+  datt = datt %>% mutate(MAX_SEQ=max_seq,
+                         MIN_SEQ=min_seq)
+  
+  
+  pred_list[[i]]=datt %>% 
+    group_by(ID,TAG,REAL_DATE_EXT_TEST) %>% 
+    summarize(PREDICTED_WAKEUP=min(TimeStamp[PRED_SEQ==MIN_SEQ]),
+              PREDICTED_FALLASLEEP=max(TimeStamp[PRED_SEQ==MAX_SEQ]),
+              AWAKE_PERC=grid_ref$AWAKE_PERC,
+              SLEEP_PERC=grid_ref$SLEEP_PERC,
+              .groups="keep") %>%
+    ungroup() %>% 
+    mutate(REAL_DATE_JOINER=as_date(REAL_DATE_EXT_TEST)+days(1),
+           REAL_DATE_JOINER=as.character(REAL_DATE_JOINER))
+  
+  
+  pred_temp=datt %>% 
+    group_by(ID,TAG,REAL_DATE_EXT_TEST) %>% 
+    summarize(PREDICTED_WAKEUP=min(TimeStamp[PRED_SEQ==MIN_SEQ]),
+              PREDICTED_FALLASLEEP=max(TimeStamp[PRED_SEQ==MAX_SEQ]),
+              .groups="keep") %>%
+    ungroup() %>% 
+    mutate(REAL_DATE_JOINER=as_date(REAL_DATE_EXT_TEST)+days(1),
+           REAL_DATE_JOINER=as.character(REAL_DATE_JOINER))
+  
+  #################################################################
+  
+  temp_final=bind_rows(temp_final,pred_temp)
+  
+  temp_final=temp_final %>% distinct()
+  }
+}
+
+################################################################################
+################################################################################
+
+
+saveRDS(nosleep_df, paste(working_dir,'pred_date_',current_date,'/no_sleep_final_intervals.Rds',sep=""))
+
+################################################################################
+################################################################################
+##this aggregates the pred_list into a data frame
+
+preds_only=bind_rows(pred_list)
+
+pred_final=(final_predictions %>% 
+              select(ID,TAG,PREDICTION_CATEGORY,
+                     REAL_DATE_EXT=REAL_DATE_EXT_TEST) %>% 
+              distinct()) %>%
+  inner_join(preds_only,by=c("ID","TAG"))
+
+
+##################################################################################################
+##################################################################################################
+
+##joining the activity and interval category data so we can compare the correction to what existed beforehand
+
+pred_final=pred_final %>% 
+  inner_join(activity_dat %>% 
+               mutate(TAG=paste(ID,REAL_DATE,sep="_")) %>%
+               select(ID,TAG,OBSMIN,VMSEDENTARY),
+             by=c("ID","TAG"))
+
+pred_final=pred_final %>% left_join(activity_index %>% select(TAG,INTERVAL_CAT_ALT),
+                                     by="TAG")
+
+pred_final=pred_final %>% left_join(cat_dat %>% select(TAG,PREV_END,SLPITSRT15,DATE_DIFF,SLPITEND15),
+                                     by="TAG")
+
+
+
+pred_final = pred_final %>% 
+  mutate(
+    PREDICTED_WAKEUP_RAW=PREDICTED_WAKEUP,
+    PREDICTED_WAKEUP=as_datetime(ifelse(INTERVAL_CAT_ALT=="2",PREV_END,PREDICTED_WAKEUP)),
+    PREDICTED_FALLASLEEP_RAW=PREDICTED_FALLASLEEP,
+    PREDICTED_FALLASLEEP=as_datetime(ifelse(INTERVAL_CAT_ALT=="3",SLPITSRT15,PREDICTED_FALLASLEEP))
+    )
+
+
+pred_final=pred_final %>% mutate(CORRECTION_TYPE="MODEL_CORRECTION")
+
+pred_final=pred_final %>% left_join(activity_index %>% select(TAG,BEGINNING,ENDING),
+                                    by="TAG")
+
+pred_final=pred_final %>% left_join(cat_dat %>% select(TAG,DISREGARD_SLEEP),
+                                    by="TAG")
+
+diary_correction=diary_correction %>% mutate(CORRECTION_TYPE="DIARY_CORRECTION",
+                                             PREDICTION_CATEGORY="NOT_APPLICABLE")
+
+total_corrected=rbind(diary_correction %>% select(ID,REAL_DATE_EXT=REAL_DATE,TAG,
+                                                  OBSMIN,
+                                                  VMSEDENTARY,DISREGARD_SLEEP,
+                                                  INTERVAL_CAT_ALT,
+                                                  PREDICTED_WAKEUP=PREV_END_ALT,
+                                                  PREDICTED_FALLASLEEP=SLPITSRT15_ALT,
+                                                  CORRECTION_TYPE,
+                                                  PREDICTION_CATEGORY,
+                                                  BEGINNING,
+                                                  ENDING,
+                                                  SLPITSRT15,
+                                                  SLPITEND15) %>%
+                        filter(INTERVAL_CAT_ALT=="1" | (BEGINNING==1 & INTERVAL_CAT_ALT !="4")),
+                      pred_final %>% select(ID,REAL_DATE_EXT,TAG,
+                                            OBSMIN,
+                                            VMSEDENTARY,DISREGARD_SLEEP,
+                                            INTERVAL_CAT_ALT,
+                                            PREDICTED_WAKEUP,
+                                            PREDICTED_FALLASLEEP,
+                                            CORRECTION_TYPE,
+                                            PREDICTION_CATEGORY,
+                                            BEGINNING,
+                                            ENDING,
+                                            SLPITSRT15,
+                                            SLPITEND15))
+
+total_corrected=total_corrected %>% arrange(ID,REAL_DATE_EXT)
+
+tag_count=total_corrected %>% group_by(TAG) %>%
+  summarize(COUNT=n(),
+            .groups="keep")
+
+tag_count %>% filter(COUNT>1)
+
+
+
+################################################################################
+################################################################################
+
+
+total_corrected_final= total_corrected %>% left_join(activity_dat %>% 
+                                                 select(TAG,MIN_WEARING,MAX_WEARING,
+                                                        DIARY_RANGE_CHECK,
+                        MMODERATE,MMVPA1,MMVPA2,FMVPA,NMVPA,VMLLIGHT,VMHLIGHT,VMMVPA,NLIGHT,
+                        NMODERATE,NVIGOROUS,FLIGHT,FMODERATE,FVIGOROUS,MLIGHT,MMODLIFE,MMODWALK,
+                        MVIGOROUS,METS_F1,METS_S1),
+                        by="TAG")
+
+
+
+###################################################################################################
+###################################################################################################
+###################################################################################################
+##
+#now we have to recalculate all of the activity measurments that were initially performed in step 1
+# (this includes rerunning the choi algorithm)
+
+folder_loc=paste(working_dir,"temp_raw_data/",sep="")
+
+
+folder_name=substr(folder_loc,
+                   data.frame(str_locate_all(folder_loc,"/")[[1]])$end[length(data.frame(str_locate_all(folder_loc,"/")[[1]])$end)-1]+1,
+                   data.frame(str_locate_all(folder_loc,"/")[[1]])$end[length(data.frame(str_locate_all(folder_loc,"/")[[1]])$end)]-1)
+
+files=list.files(folder_loc,pattern=".csv")
+
+
+
+letter_space="[[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ ]]"
+
+diary_dates=tibble(read.csv(paste(working_dir,"diary_summary.csv",sep="")))
+
+source(paste(working_dir,"header_script_for_github_7_13_2022.R",sep=""))
+
+
+
+header_dat=do.call("rbind",
+                   lapply(seq(from=1,
+                              to=length(files),
+                              by=1),
+                          header_fct))
+
+header_dat=header_dat %>% left_join(y=diary_dates %>% 
+                                      mutate(ID=as.character(ID),
+                                             across(c("STARTWAT","STOPWAT","STARTMON","STOPMON"), ~as.Date(.x,format="%m/%d/%Y"))) %>%
+                                      select(ID,VISIT,STARTWAT,STOPWAT,STARTMON,STOPMON,TRNDT,SITE_ID),
+                                    by="ID")
+
+
+
+#################################################################################
+#################################################################################
+
+
+
+rerun_list=list()
+
+
+suppressWarnings(for (i in seq(from=1,to=length(files),by=1)) {
+  
+  
+  filename=paste(folder_loc,files[i],sep="")
+  
+  id_location=max(data.frame(str_locate_all(filename,"/")[[1]])$end)
+  
+  id=substr(filename,id_location+1,(id_location+7))
+  
+  
+  dat=tibble(read.csv(filename,skip=10,colClasses=c(rep("integer",3),rep("NULL",6)))) %>%
+    mutate(ID=id) %>%
+    left_join(y=header_dat,
+              by="ID") 
+  
+  dat=dat %>%
+    mutate(EPOCH_CUM=cumsum(EPOCH_CUM)-1,
+           TimeStamp=START_DT + dminutes(EPOCH_CUM),
+           REAL_DATE=date(TimeStamp),
+           VM=sqrt((Axis1)^2 + (Axis2)^2 + (Axis3)^2))  
+  
+  diary_check_num=nrow(dat %>% filter(REAL_DATE>=STARTMON & REAL_DATE<=STOPMON))
+  
+  colnames(dat)=sapply(colnames(dat),function(i){str_replace_all(i,"\\.","_")})
+  
+  ##create a subset of the data for choi processing (not necessary but a nice thing to do)
+  
+  dat=data.frame(dat  %>% filter(REAL_DATE>=STARTMON & REAL_DATE<=STOPMON))
+  
+  ##process the data using the choi algorithm
+  
+  dat=tibble(wearingMarking(dataset=dat, 
+                            frame=90,
+                            perMinuteCts=1,
+                            TS="TimeStamp",
+                            cts="VM",
+                            allowanceFrame=2,
+                            newcolname="wearing")) 
+  
+  tags=unique(total_corrected_final %>% filter(ID %in% id)%>%
+                pull(TAG))
+  
+  for (j in tags) {
+    
+    dat_sub=dat %>% inner_join(total_corrected_final %>% 
+                                 filter(TAG==j) %>% 
+                                 select(ID,TAG,PREDICTED_WAKEUP,PREDICTED_FALLASLEEP),
+                               by="ID")
+    
+    dat_sub=dat_sub %>% filter(TimeStamp>=PREDICTED_WAKEUP & TimeStamp <=PREDICTED_FALLASLEEP)
+    
+    
+    dat_sub=dat_sub %>%
+      mutate(MIN_WEARING_POST_PRED=min(TimeStamp[wearing=="w"]),
+             MAX_WEARING_POST_PRED=max(TimeStamp[wearing=="w"])) %>%
+      ungroup()
+    
+    if (nrow(dat_sub)>1) {
+      dat_sub=dat_sub %>% filter(TimeStamp>=PREDICTED_WAKEUP & TimeStamp<=PREDICTED_FALLASLEEP)
+      
+      obs_count=dat_sub %>% group_by(TAG) %>%
+        summarize(OBSMIN_POST_PRED=length(unique(TimeStamp[wearing=="w"])),
+                  .groups="keep")
+      
+      
+      
+      ############creating discretized variables
+      
+      ##doing mvar cuts
+      # mlight<-ifelse(100<=ctd & ctd<760,1,0)
+      # mmodlife<-ifelse(760<=ctd & ctd<1952,1,0)
+      # mmodwalk<-ifelse(1952<=ctd & ctd<5725,1,0)
+      # mvigorous<-ifelse(5725<=ctd,1,0)
+      
+      mvar=dat_sub %>% 
+        filter(wearing=="w") %>%
+        select(TAG, TimeStamp, Axis1) %>%
+        mutate(MVAR= cut(Axis1, 
+                         breaks=c(100,760,1952,5725,10000000000000000),
+                         labels=c("MLIGHT_POST_PRED","MMODLIFE_POST_PRED","MMODWALK_POST_PRED",
+                                  "MVIGOROUS_POST_PRED"),
+                         include.lowest=TRUE,
+                         right=FALSE),
+               ONE=1
+        ) %>% 
+        pivot_wider(id_cols=c("TAG"),
+                    names_from="MVAR",
+                    values_from="ONE",
+                    values_fn=sum,
+                    values_fill=0) %>%
+        select(-`NA`)
+      
+      ###FREEDSON VARIABLES
+      # flight<-ifelse(100<=ctd & ctd<1952,1,0)
+      # fmoderate<-ifelse(1952<=ctd & ctd<5725,1,0)
+      # fvigorous<-ifelse(5725<=ctd,1,0)
+      
+      freedson=dat_sub %>%
+        filter(wearing=="w") %>%
+        select(TAG,TimeStamp,Axis1) %>%
+        mutate(FREE=cut(Axis1,
+                        breaks=c(100,1952,5725,100000000000000),
+                        labels=c("FLIGHT_POST_PRED","FMODERATE_POST_PRED","FVIGOROUS_POST_PRED"),
+                        include.lowest=TRUE,
+                        right=FALSE),
+               ONE=1) %>% 
+        pivot_wider(id_cols="TAG",
+                    names_from="FREE",
+                    values_from="ONE",
+                    values_fn=sum,
+                    values_fill=0) %>% 
+        select(-`NA`) 
+      
+      ####NHAINES VARIABLES
+      # nlight<-ifelse(100<=ctd & ctd<2020,1,0)
+      # nmoderate<-ifelse(2020<=ctd & ctd<5999,1,0)
+      # nvigorous<-ifelse(5999<=ctd,1,0)
+      
+      nhaines=dat_sub %>% 
+        filter(wearing=="w") %>%
+        select(TAG,TimeStamp,Axis1) %>%
+        mutate(NHAINE=cut(Axis1,
+                          breaks=c(100,2020,5999,100000000000000),
+                          labels=c("NLIGHT_POST_PRED","NMODERATE_POST_PRED","NVIGOROUS_POST_PRED"),
+                          include.lowest=TRUE,
+                          right=FALSE),
+               ONE=1) %>% 
+        pivot_wider(id_cols="TAG",
+                    names_from="NHAINE",
+                    values_from="ONE",
+                    values_fn=sum,
+                    values_fill=0) %>% 
+        select(-`NA`) 
+      
+      ##VECTOR MAGNITUDE VARIABLES
+      #   vmsedentary<-ifelse(0<=VM & VM<76,1,0)
+      # vmllight<-ifelse(76<=VM & VM<903,1,0)
+      # vmhlight<-ifelse(903<=VM & VM<2075,1,0)
+      # vmmvpa<-ifelse(2075<=VM,1,0)
+      
+      vecm=  dat_sub %>% 
+        filter(wearing=="w") %>%
+        select(TAG,TimeStamp,VM) %>%
+        mutate(FREE=cut(VM,
+                        breaks=c(0,76,903,2075,100000000000000),
+                        labels=c("VMSEDENTARY_POST_PRED","VMLLIGHT_POST_PRED","VMHLIGHT_POST_PRED","VMMVPA_POST_PRED"),
+                        include.lowest=TRUE,
+                        right=FALSE),
+               ONE=1) %>% 
+        pivot_wider(id_cols="TAG",
+                    names_from="FREE",
+                    values_from="ONE",
+                    values_fn=sum,
+                    values_fill=0) 
+      
+      ###NOW ALL OF THE OVERLAPPING VARIABLES
+      
+      # fmvpa<-ifelse(fmoderate==1 | fvigorous==1,1,0)   
+      # mmvpa1<-ifelse(mmodlife==1 | mmodwalk==1 | mvigorous==1,1,0)
+      # mmvpa2<-ifelse(mmodwalk==1 | mvigorous==1,1,0)
+      # mmoderate<-ifelse(760<=ctd & ctd<=5725,1,0)
+      # nmvpa<-ifelse(nmoderate==1 | nvigorous==1,1,0)
+      # mets_f1=1.439008 + (0.000795 * ctd)
+      # mets_s1=2.606 + (0.0006863 * ctd)
+      
+      overlapping_vars= dat_sub %>% 
+        filter(wearing=="w") %>%
+        select(TAG,TimeStamp,Axis1) %>%
+        mutate(MMODERATE_POST_PRED=ifelse(Axis1>=760 & Axis1<5725,1,0),
+               MMVPA1_POST_PRED=ifelse(Axis1>=760,1,0),
+               MMVPA2_POST_PRED=ifelse(Axis1>=1952,1,0),
+               FMVPA_POST_PRED= ifelse(Axis1>=1952,1,0),
+               NMVPA_POST_PRED=ifelse(Axis1>=2020,1,0),
+               METS_F1_POST_PRED=((Axis1*0.000795) +1.439008),
+               METS_S1_POST_PRED=((Axis1*0.0006863) +2.606),
+               INACTIVE_POST_PRED=ifelse(Axis1<100,1,0),
+               ACTIVE_POST_PRED=ifelse(Axis1>=100,1,0))%>% 
+        pivot_longer(cols=c("MMODERATE_POST_PRED","MMVPA1_POST_PRED","MMVPA2_POST_PRED",
+                            "FMVPA_POST_PRED","NMVPA_POST_PRED",
+                            "METS_F1_POST_PRED","METS_S1_POST_PRED",
+                            "INACTIVE_POST_PRED","ACTIVE_POST_PRED"))%>%
+        group_by(TAG,name) %>% 
+        summarize(SUM=sum(value,na.rm=TRUE),
+                  .groups="keep") %>%
+        ungroup() %>%
+        pivot_wider(id_cols="TAG",
+                    names_from="name",
+                    values_from="SUM")
+      
+      
+      
+      
+      
+      dat_final=distinct(dat_sub %>% select(ID,TAG,
+                                            MIN_WEARING_POST_PRED,
+                                            MAX_WEARING_POST_PRED)) %>%
+        left_join(obs_count,by="TAG") %>% 
+        left_join(overlapping_vars,by="TAG") %>% 
+        left_join(freedson,by="TAG")%>% 
+        left_join(vecm,by="TAG")%>% 
+        left_join(nhaines,by="TAG")%>% 
+        left_join(mvar,by="TAG") 
+      
+      disc_vars_to_have=c("MMODERATE_POST_PRED","MMVPA1_POST_PRED","MMVPA2_POST_PRED",
+                          "FMVPA_POST_PRED","NMVPA_POST_PRED",
+                          "VMSEDENTARY_POST_PRED","VMLLIGHT_POST_PRED",
+                          "VMHLIGHT_POST_PRED","VMMVPA_POST_PRED",
+                          "NLIGHT_POST_PRED","NMODERATE_POST_PRED","NVIGOROUS_POST_PRED",
+                          "FLIGHT_POST_PRED","FMODERATE_POST_PRED","FVIGOROUS_POST_PRED",
+                          "MLIGHT_POST_PRED","MMODLIFE_POST_PRED","MMODWALK_POST_PRED","MVIGOROUS_POST_PRED",
+                          "ACTIVE_POST_PRED","INACTIVE_POST_PRED")
+      
+      
+      missing_disc_vars=setdiff(disc_vars_to_have,
+                                colnames(dat_final))
+      
+      
+      dat_final=data.table(dat_final)
+      
+      dat_final[,c(missing_disc_vars):=0]
+      
+      dat_final=tibble(dat_final)
+      
+      rerun_list[[j]]=dat_final %>% relocate(c("ID",
+                                               "TAG",
+                                               "OBSMIN_POST_PRED",
+                                               "MIN_WEARING_POST_PRED",
+                                               "MAX_WEARING_POST_PRED",
+                                               all_of(c(disc_vars_to_have))))
+    }
+    else {print(paste(id," not in data",sep=""))}
+  }
+  
+  
+}
+)
+
+###########################################################################
+###########################################################################
+
+rerun_dat=bind_rows(rerun_list)
+
+###########################################################################
+###########################################################################
+
+total_corrected_rerun_final=total_corrected_final %>%
+  inner_join(rerun_dat %>% select(-ID),
+             by="TAG")
+
+##############################################################################
+##################################################################################
+
+##now we have the create the 2d bivariate distribution to try and approximate time in between removing waistband and falling asleep
+#remember: INTERVAL CAT_ALT
+# 1/ none missing
+# 2/ sleep_2 missing
+# 3/ sleep_1 missing
+# 4/ sleep_1 and sleep_2 missing
+sleep=total_corrected_rerun_final %>% filter(INTERVAL_CAT_ALT %in% c("1","3"))
+
+sleep=sleep %>% mutate(SLEEP_WEAR_DIFF=as.numeric(difftime(PREDICTED_FALLASLEEP,
+                                                           MAX_WEARING_POST_PRED,
+                                                           units="mins")))
+
+summary(sleep %>% pull(SLEEP_WEAR_DIFF))
+
+sd(sleep %>% pull(SLEEP_WEAR_DIFF))
+
+mean(sleep %>% pull(SLEEP_WEAR_DIFF))
+
+sleep %>% filter(SLEEP_WEAR_DIFF>400)
+
+library(MASS)
+
+sleep_kde2d=kde2d(x=sleep$OBSMIN_POST_PRED,
+                  y=sleep$SLEEP_WEAR_DIFF,
+                  lims=c(600,1599,0,200),
+                  n=1599-600+1)
+
+detach("package:MASS", unload = TRUE)
+
+saveRDS(sleep_kde2d,paste(working_dir,"pred_date_",current_date,"/bivariate_waistband_removal_sleep_distribution.RDS",sep=""))
+
+
+##sample from the distribution 10 times
+for (i in seq(from=1,to=10,by=1)) {
+  
+  total_corrected_rerun_final=total_corrected_rerun_final %>% mutate(test=map_dbl(OBSMIN_POST_PRED,
+                                                      ~diff_sample_fct(i=.x,
+                                                                       obj=sleep_kde2d))) %>%
+    rename_at(c("test"),
+              ~paste("SLEEP_WEAR_DIFF",i,sep="_"))
+}
+
+
+total_corrected_rerun_final=total_corrected_rerun_final %>% rowwise() %>% 
+  mutate(MEAN_SLEEP_WEAR_DIFF=round(mean(c(SLEEP_WEAR_DIFF_1,SLEEP_WEAR_DIFF_2,SLEEP_WEAR_DIFF_3,
+                                           SLEEP_WEAR_DIFF_4,SLEEP_WEAR_DIFF_5,SLEEP_WEAR_DIFF_6,
+                                           SLEEP_WEAR_DIFF_7,SLEEP_WEAR_DIFF_8,SLEEP_WEAR_DIFF_9,
+                                           SLEEP_WEAR_DIFF_10)),digits=0),
+         MEDIAN_SLEEP_WEAR_DIFF=round(median(c(SLEEP_WEAR_DIFF_1,SLEEP_WEAR_DIFF_2,SLEEP_WEAR_DIFF_3,
+                                               SLEEP_WEAR_DIFF_4,SLEEP_WEAR_DIFF_5,SLEEP_WEAR_DIFF_6,
+                                               SLEEP_WEAR_DIFF_7,SLEEP_WEAR_DIFF_8,SLEEP_WEAR_DIFF_9,
+                                               SLEEP_WEAR_DIFF_10)),digits=0))
+
+##only apply the sample estimates when necessary ('INTERVAL_CAT_ALT' %in% c("2","4"))
+total_corrected_rerun_final=total_corrected_rerun_final %>% 
+  mutate(PREDICTED_FALLASLEEP_W_WEAR_DIFF_MEAN=
+           ifelse(INTERVAL_CAT_ALT %in% c("2","4"),
+                  PREDICTED_FALLASLEEP + (60*MEAN_SLEEP_WEAR_DIFF),
+                  PREDICTED_FALLASLEEP),
+         PREDICTED_FALLASLEEP_W_WEAR_DIFF_MEDIAN=
+           ifelse(INTERVAL_CAT_ALT %in% c("2","4"),
+                  PREDICTED_FALLASLEEP + (60*MEDIAN_SLEEP_WEAR_DIFF),
+                  PREDICTED_FALLASLEEP),
+         PREDICTED_FALLASLEEP_W_WEAR_DIFF_MEAN=as_datetime(PREDICTED_FALLASLEEP_W_WEAR_DIFF_MEAN,tz="UTC"),
+         PREDICTED_FALLASLEEP_W_WEAR_DIFF_MEDIAN=as_datetime(PREDICTED_FALLASLEEP_W_WEAR_DIFF_MEDIAN,tz="UTC")
+  )
+
+
+###############################################################################
+##############################################################################
+####creating sleep##########################################################
+###############################################################################
+
+##now we finally calculate the sleep
+total_corrected_rerun_final=total_corrected_rerun_final %>% group_by(ID) %>%
+  mutate(REAL_DATE_EXT_FUT=lead(REAL_DATE_EXT),
+         REAL_DATE_EXT_PAST=lag(REAL_DATE_EXT),
+         FUT_CONS_CHECK=as.numeric(difftime(REAL_DATE_EXT,REAL_DATE_EXT_FUT,units="days")),
+         FUT_CONS_CHECK=ifelse(is.na(FUT_CONS_CHECK)==TRUE & 
+                                 DISREGARD_SLEEP==0 & 
+                                 is.na(SLPITSRT15)==FALSE & 
+                                 is.na(SLPITEND15)==FALSE,-1,
+                               FUT_CONS_CHECK),
+         PAST_CONS_CHECK=as.numeric(difftime(REAL_DATE_EXT_PAST,REAL_DATE_EXT,units="days")),
+         CURRENT_FUT_WAKEUP=lead(PREDICTED_WAKEUP),
+         CURRENT_PAST_FALLASLEEP_MEAN=lag(PREDICTED_FALLASLEEP_W_WEAR_DIFF_MEAN),
+         CURRENT_PAST_FALLASLEEP_MEDIAN=lag(PREDICTED_FALLASLEEP_W_WEAR_DIFF_MEDIAN),
+         CURRENT_PAST_FALLASLEEP=lag(PREDICTED_FALLASLEEP)) %>% 
+  ungroup() %>%
+  mutate(CURRENT_FUT_WAKEUP=ifelse(ENDING==1 & DISREGARD_SLEEP==0 & 
+                                     is.na(SLPITSRT15)==FALSE & 
+                                     is.na(SLPITEND15)==FALSE,
+                                   SLPITEND15,
+                                   CURRENT_FUT_WAKEUP),
+         CURRENT_FUT_WAKEUP=as_datetime(CURRENT_FUT_WAKEUP))
+
+
+
+bad_consistency_df=total_corrected_rerun_final %>% filter(PAST_CONS_CHECK !=-1 |
+                                                            FUT_CONS_CHECK !=-1)
+
+##this is a df where people still don't have valid data preceeding and proceeding the day in question
+saveRDS(bad_consistency_df, paste(working_dir,'pred_date_',
+                current_date,'/bad_consistency_df.Rds',sep=""))
+
+
+
+total_corrected_rerun_final=total_corrected_rerun_final %>% 
+  mutate(SLEEP_1_ALT=as.numeric(difftime(PREDICTED_WAKEUP,
+                                              CURRENT_PAST_FALLASLEEP,
+                                              units="mins")),
+         SLEEP_1_ALT_MEAN=as.numeric(difftime(PREDICTED_WAKEUP,
+                                         CURRENT_PAST_FALLASLEEP_MEAN,
+                                         units="mins")),
+         SLEEP_1_ALT_MEDIAN=as.numeric(difftime(PREDICTED_WAKEUP,
+                                              CURRENT_PAST_FALLASLEEP_MEDIAN,
+                                              units="mins")),
+         SLEEP_2_ALT=as.numeric(difftime(CURRENT_FUT_WAKEUP,
+                                              PREDICTED_FALLASLEEP,
+                                              units="mins")),
+         SLEEP_2_ALT_MEAN=as.numeric(difftime(CURRENT_FUT_WAKEUP,
+                                              PREDICTED_FALLASLEEP_W_WEAR_DIFF_MEAN,
+                                         units="mins")),
+         SLEEP_2_ALT_MEDIAN=as.numeric(difftime(CURRENT_FUT_WAKEUP,
+                                                PREDICTED_FALLASLEEP_W_WEAR_DIFF_MEDIAN,
+                                         units="mins")),
+         SLEEP_1=ifelse(PAST_CONS_CHECK!=-1,NA,SLEEP_1_ALT),
+         SLEEP_1_MEAN=ifelse(PAST_CONS_CHECK!=-1,NA,SLEEP_1_ALT_MEAN),
+         SLEEP_1_MEDIAN=ifelse(PAST_CONS_CHECK!=-1,NA,SLEEP_1_ALT_MEDIAN),
+         SLEEP_2=ifelse(PAST_CONS_CHECK!=-1,NA,SLEEP_2_ALT),
+         SLEEP_2_MEAN=ifelse(FUT_CONS_CHECK!=-1,NA,SLEEP_2_ALT_MEAN),
+         SLEEP_2_MEDIAN=ifelse(FUT_CONS_CHECK!=-1,NA,SLEEP_2_ALT_MEDIAN),
+         SLEEP_1_MISSING=ifelse(is.na(SLEEP_1)==TRUE,1,0),
+         SLEEP_1_MEAN_MISSING=ifelse(is.na(SLEEP_1_MEAN)==TRUE,1,0),
+         SLEEP_1_MEDIAN_MISSING=ifelse(is.na(SLEEP_1_MEDIAN)==TRUE,1,0),
+         SLEEP_2_MISSING=ifelse(is.na(SLEEP_2)==TRUE,1,0),
+         SLEEP_2_MEAN_MISSING=ifelse(is.na(SLEEP_2_MEAN)==TRUE,1,0),
+         SLEEP_2_MEDIAN_MISSING=ifelse(is.na(SLEEP_2_MEDIAN)==TRUE,1,0))
+
+
+total_corrected_rerun_final %>% filter(SLEEP_1_MEAN_MISSING==1 & PAST_CONS_CHECK==-1)
+
+nosleep_df2=total_corrected_rerun_final %>% 
+  filter((SLEEP_2_MEAN<60 | SLEEP_2_MEDIAN<60 | SLEEP_1_MEAN<60 | 
+                                         SLEEP_1_MEDIAN<60) & (SLEEP_1_MEAN_MISSING==0 | 
+                                                                SLEEP_1_MEDIAN_MISSING==0 | 
+                                                                SLEEP_2_MEAN_MISSING==0 | 
+                                                                SLEEP_2_MEDIAN_MISSING==0)) 
+##this is for people who had suspiciously low amounts of sleep
+saveRDS(nosleep_df2, paste(working_dir,'pred_date_',
+                           current_date,'/no_sleep_updated.Rds',sep=""))
+
+
+
+total_corrected_rerun_final=total_corrected_rerun_final %>% 
+                                    mutate(SLEEP_1=ifelse(SLEEP_1<60,NA,SLEEP_1),
+                                           SLEEP_2=ifelse(SLEEP_2<60,NA,SLEEP_2),
+                                           SLEEP_1_MEAN=ifelse(SLEEP_1_MEAN<60,NA,SLEEP_1_MEAN),
+                                           SLEEP_2_MEAN=ifelse(SLEEP_2_MEAN<60,NA,SLEEP_2_MEAN),
+                                           SLEEP_1_MEDIAN=ifelse(SLEEP_1_MEDIAN<60,NA,SLEEP_1_MEDIAN),
+                                           SLEEP_2_MEDIAN=ifelse(SLEEP_2_MEDIAN<60,NA,SLEEP_2_MEDIAN),
+                                           SLEEP_1_MISSING=ifelse(is.na(SLEEP_1)==TRUE,1,0),
+                                           SLEEP_1_MEAN_MISSING=ifelse(is.na(SLEEP_1_MEAN)==TRUE,1,0),
+                                           SLEEP_1_MEDIAN_MISSING=ifelse(is.na(SLEEP_1_MEDIAN)==TRUE,1,0),
+                                           SLEEP_2_MISSING=ifelse(is.na(SLEEP_2)==TRUE,1,0),
+                                           SLEEP_2_MEAN_MISSING=ifelse(is.na(SLEEP_2_MEAN)==TRUE,1,0),
+                                           SLEEP_2_MEDIAN_MISSING=ifelse(is.na(SLEEP_2_MEDIAN)==TRUE,1,0))
+
+
+
+
+total_corrected_rerun_final=total_corrected_rerun_final %>% 
+  mutate(ACSLPTOT15_CALCULATED=as.numeric(difftime(SLPITEND15,SLPITSRT15,units="mins")),
+         ACSLPTOT15_CALCULATED_MEAN=ifelse(is.na(SLEEP_2_MEAN)==TRUE,NA,ACSLPTOT15_CALCULATED),
+         ACSLPTOT15_CALCULATED_MEDIAN=ifelse(is.na(SLEEP_2_MEDIAN)==TRUE,NA,ACSLPTOT15_CALCULATED))
+
+##just as a reminder, from the sleep documenation
+# Scored Total Sleep Time (ACSLPTOT15): The total number of epochs between 
+# Start Time and End Time of the given interval scored as SLEEP (by the software) 
+# multiplied by the Epoch Length in minutes (Sleep Time = Duration - Wake Time x epoch length).
+
+total_corrected_rerun_final=total_corrected_rerun_final %>% mutate(
+  OBSMIN_DIFF_POST_PRED=OBSMIN_POST_PRED-OBSMIN)
+
+#######################################
+
+saveRDS(total_corrected_rerun_final,paste(working_dir,'pred_date_',current_date,'/final_data_and_wake_intervals.RDS',sep=''))
+
+#######################################
+#######################################
+#######################################
+#######################################
+#######################################
+#######################################
+#######################################
+#######################################
+#######################################
+#######################################
+#######################################
+#######################################
+#######################################
+# 
+# total_corrected_rerun_final %>% group_by(SLEEP_1_MISSING,
+#                                          SLEEP_2_MISSING,
+#                                          SLEEP_1_MEAN_MISSING,
+#                                    SLEEP_2_MEAN_MISSING,
+#                                    SLEEP_1_MEDIAN_MISSING,
+#                                    SLEEP_2_MEDIAN_MISSING,
+#                                    BEGINNING,ENDING) %>% 
+#   summarize(COUNT=n(),
+#             .groups="keep")
+# 
+# total_corrected_final %>% filter(OBSMIN<0)
+# 
+# total_corrected_final %>% filter(NEW_OBSMIN<0)
+# 
+# total_corrected_final %>% filter(OBSMIN>1440)
+# 
+# total_corrected_final %>% filter(is.na(PREDICTED_WAKEUP)==TRUE)
+################################################################################################
+############################################################################################
+
+
+# test=readRDS('total_corrected_final_4_25_2022.RDS')
+# 
+# test %>% filter(ID %in% c("1304249"))
+
+```

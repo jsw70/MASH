@@ -1,0 +1,73 @@
+---
+title: "step_5_youden_threshold"
+author: "JF"
+date: "2022-08-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(data.table)
+library(rgenoud)
+library(stringr)
+library(reticulate)
+library(haven)
+library(lubridate)
+library(zoo)
+library(cutpointr)
+
+options(dplyr.width = Inf)
+
+use_virtualenv("H:/cnn_10_8_2021/",required=TRUE)
+
+pd=import("pandas")
+
+working_dir="L:/SWAN/data analysis/Analyst Folders/JF/projects/actigraphy/Colvin_5_21_2021/scripts/github/"
+
+
+current_date=read.csv(paste(working_dir,"current_date_reference_tag.csv",sep=""))
+
+```
+
+```{r }
+
+
+pred_dat_with=tibble(pd$read_pickle(paste(working_dir,'python_batch_iteration_data/set_assignment_', current_date,'/predictions_1D_CNN_WITH_LUX.pkl',sep="")))
+
+pred_dat_with=pred_dat_with %>% mutate(TimeStamp=as_datetime(TimeStamp,tz="UTC"),
+                             REAL_DATE=as_date(REAL_DATE_EXT))
+
+
+##########
+
+pred_dat_without=tibble(pd$read_pickle(paste(working_dir,'/python_batch_iteration_data/set_assignment_',current_date,'/predictions_1D_CNN_WITHOUT_LUX.pkl',sep="")))
+
+pred_dat_without=pred_dat_without %>% mutate(TimeStamp=as_datetime(TimeStamp,tz="UTC"),
+                                       REAL_DATE=as_date(REAL_DATE_EXT))
+
+
+
+
+
+cutpoints_without_lux=cutpointr(data=pred_dat_without,x='PRED_AWAKE',class='WI',method=maximize_metric,metric=youden)
+
+
+cutpoints_with_lux=cutpointr(data=pred_dat_with,x='PRED_AWAKE',class='WI',method=maximize_metric,metric=youden)
+
+
+saveRDS(cutpoints_without_lux, paste(working_dir,"pred_date_",current_date,"/youden_without_lux.RDS",sep=""))
+
+saveRDS(cutpoints_with_lux, paste(working_dir,"pred_date_",current_date,"/youden_with_lux.RDS",sep=""))
+
+
+# pred_dat_with=pred_dat_with %>% 
+#   mutate(PRED_CLASS=ifelse(PRED_AWAKE>=cutpoints_with_lux$optimal_cutpoint,1,0))
+# 
+# pred_dat_without=pred_dat_without %>% 
+#   mutate(PRED_CLASS=ifelse(PRED_AWAKE>=cutpoints_without_lux$optimal_cutpoint,1,0))
+# 
+# saveRDS(pred_dat_with,"L:/SWAN/data analysis/Analyst Folders/JF/projects/actigraphy/Colvin_5_21_2021/data/data_for_prediction/pred_date_2022-08-09/TEST_predictions_with_lux.RDS")
+# 
+# saveRDS(pred_dat_without,"L:/SWAN/data analysis/Analyst Folders/JF/projects/actigraphy/Colvin_5_21_2021/data/data_for_prediction/pred_date_2022-08-09/TEST_predictions_without_lux.RDS")
+
+```

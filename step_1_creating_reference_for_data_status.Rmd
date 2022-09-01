@@ -1,0 +1,129 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r loading needed packages}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(PhysicalActivity)
+library(ggplot2)
+library(data.table)
+library(RcppRoll)
+library(zoo)
+library(foreign)
+library(haven)
+options(dplyr.width = Inf)
+library(imputeTS)
+
+library(reticulate)
+use_virtualenv("H:/cnn_10_8_2021/",required=TRUE)
+
+current_date=Sys.Date()
+
+
+##this should be the folder where you save/have everything for this project
+##this includes raw data, all scripts, etc
+##obviously you can set things up whatever way you like, the code is structured this way for ease of use/communication
+
+working_dir="L:/SWAN/data analysis/Analyst Folders/JF/projects/actigraphy/Colvin_5_21_2021/scripts/github/"
+
+write.csv(current_date,paste(working_dir,"current_date_reference_tag.csv",sep=""),
+          row.names=FALSE)
+
+
+```
+
+
+```{r processing raw data to be ready for input into 1D-CNN}
+#########################################
+
+##path to all of the actigraphy files
+folder_loc=paste(working_dir,"temp_raw_data/",sep="")
+
+
+folder_name=substr(folder_loc,
+                   data.frame(str_locate_all(folder_loc,"/")[[1]])$end[length(data.frame(str_locate_all(folder_loc,"/")[[1]])$end)-1]+1,
+                   data.frame(str_locate_all(folder_loc,"/")[[1]])$end[length(data.frame(str_locate_all(folder_loc,"/")[[1]])$end)]-1)
+
+#get a list of all actigraphy files
+files=list.files(folder_loc,pattern=".csv")
+
+##########################################
+##############################################
+##path to all of the actiwatch files
+
+folder_loc_lux=paste(working_dir,"temp_raw_data_w_lux/",sep="")
+
+folder_name_lux=substr(folder_loc_lux,
+                       data.frame(str_locate_all(folder_loc_lux,"/")[[1]])$end[length(data.frame(str_locate_all(folder_loc_lux,"/")[[1]])$end)-1]+1,
+                       data.frame(str_locate_all(folder_loc_lux,"/")[[1]])$end[length(data.frame(str_locate_all(folder_loc_lux,"/")[[1]])$end)]-1)
+
+#get a list of all actiwatch files
+files_lux=list.files(folder_loc_lux,pattern=".csv")
+
+
+############################################
+##############################################
+
+letter_space="[[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ ]]"
+
+diary_dates=tibble(read.csv(paste(working_dir,"diary_summary.csv",sep="")))
+
+source(paste(working_dir,"raw_data_functions_for_github_6_23_2022.R",sep=""))
+
+source(paste(working_dir,"header_script_for_github_7_13_2022.R",sep=""))
+
+
+header_dat=do.call("rbind",
+                   lapply(seq(from=1,
+                              to=length(files),
+                              by=1),
+                          header_fct))
+
+header_dat=header_dat %>% left_join(y=diary_dates %>% 
+                                      mutate(ID=as.character(ID),
+                                             across(c("STARTWAT","STOPWAT","STARTMON","STOPMON"), ~as.Date(.x,format="%m/%d/%Y"))) %>%
+                                      select(ID,VISIT,STARTWAT,STOPWAT,STARTMON,STOPMON,TRNDT,SITE_ID),
+                                    by="ID")
+
+
+
+######creating the base activity data
+#value for pre_filter
+####TRUE indicates that you want the raw data truncated within monitor-wearing dates before choi algorithm is run
+####FALSE that you don't
+###################
+preff=TRUE
+
+activity_data=suppressWarnings(do.call("rbind",lapply(seq(from=1,
+                                     to=length(files),
+                                     by=1),
+                                 choi_process,
+                                 prefilter=preff)))
+
+
+activity_data_name=paste("processed_activity_data_",current_date,".Rda",sep="")
+
+
+##create a place to save the processed files
+subDir=paste("raw_data_processed_",current_date,sep="")
+dir.create(file.path(working_dir, subDir))
+setwd(file.path(working_dir, subDir))
+
+##save the activity data if necessary
+
+saveRDS(activity_data,
+        file=paste(working_dir,"raw_data_processed_",current_date,"/",activity_data_name,sep=""))
+
+##this script runs the initial day/night pairings described in section A of the supplementary materials
+source(paste(working_dir,"initial_day_night_join_github_7_14_2022.R",sep=""))
+
+```
+

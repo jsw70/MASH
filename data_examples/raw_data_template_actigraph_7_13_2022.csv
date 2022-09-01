@@ -1,0 +1,12 @@
+------------ Data File Created By ActiGraph GT3X+ ActiLife v6.11.5 Firmware v1.8.0 date format M/d/yyyy Filter Normal Multiple Incline Limb: Undefined -----------,,,,,,,,
+Serial Number: MOS2C43141297,,,,,,,,
+Start Time 00:01:00,,,,,,,,
+Start Date 1/1/1900,,,,,,,,
+Epoch Period (hh:mm:ss) 00:01:00,,,,,,,,
+Download Time 00:00:00,,,,,,,,
+Download Date 1/1/1900,,,,,,,,
+Current Memory Address: 0,,,,,,,,
+Current Battery Voltage: 3.85     Mode = 61,,,,,,,,
+--------------------------------------------------,,,,,,,,
+Axis1,Axis2,Axis3,Steps,Lux,Inclinometer Off,Inclinometer Standing,Inclinometer Sitting,Inclinometer Lying
+1111,1111,1111,1111,1111,1111,1111,1111,1111

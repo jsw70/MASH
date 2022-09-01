@@ -1,0 +1,225 @@
+---
+title: "step_6_building_activity_index_for_predictions"
+author: "JF"
+date: "2022-08-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(PhysicalActivity)
+library(ggplot2)
+library(data.table)
+library(RcppRoll)
+library(zoo)
+library(foreign)
+library(haven)
+library(imputeTS)
+options(dplyr.width = Inf)
+
+working_dir="L:/SWAN/data analysis/Analyst Folders/JF/projects/actigraphy/Colvin_5_21_2021/scripts/github/"
+
+
+current_date=read.csv(paste(working_dir,"current_date_reference_tag.csv",sep=""))
+
+library(reticulate)
+use_virtualenv("H:/cnn_10_8_2021/",required=TRUE)
+
+```
+
+
+```{r }
+#########################################################################################################################################
+
+#load in the interval data previous created at the end of 'step_1_creating_reference_for_data_status.R'
+
+interval_dat=tibble(readRDS( paste(working_dir,'raw_data_processed_',current_date,'/TIER_1_',current_date,'.Rda',sep="")))
+
+interval_dat = interval_dat  %>% mutate(REAL_DATE=as.Date(STRDATE_ALT,format="%Y-%m-%d"))
+########################################################
+
+##load the activity data created earlier in this script
+##only do this if you haven't run the earlier parts of the script in this session
+activity_data=tibble(readRDS(paste(working_dir,"raw_data_processed_",current_date,"/processed_activity_data_",current_date,".Rda",sep="")))
+
+#####################
+##create a new folder to store the data for predictions in
+subDir=paste("pred_date",current_date,sep="_")
+
+if (dir.exists(file.path(working_dir, subDir))==FALSE){
+  dir.create(file.path(working_dir, subDir))
+}
+
+if (dir.exists(file.path(working_dir, subDir,"with_lux"))==FALSE){
+  dir.create(file.path(working_dir, subDir,"with_lux"))
+}
+if (dir.exists(file.path(working_dir,subDir,"without_lux"))==FALSE){
+  dir.create(file.path(working_dir,subDir,"without_lux"))
+}
+
+#########################
+
+#####################################################
+#########input needed################################
+###the variable 'num_valid_days' indicates what the lowest number of days total per person allowed are
+num_valid_days=4
+
+source(paste(working_dir,"building_activity_index_8_25_2022.R",sep=""))
+
+##these are created in the above source() command
+###cat_type_count_df has a break down of the interval categories
+saveRDS(cat_type_count_df,paste(working_dir,subDir,"/cat_breakdown.RDS",sep=""))
+
+###activity_index is what is references to see who does/doesn't need a prediction made on any given day
+saveRDS(activity_index,paste(working_dir,subDir,"/activity_index.RDS",sep=""))
+########################################
+#######################################
+
+################################
+#get a list of actigraph files again
+folder_loc=paste(working_dir,"temp_raw_data/",sep="")
+
+folder_name=substr(folder_loc,
+                   data.frame(str_locate_all(folder_loc,"/")[[1]])$end[length(data.frame(str_locate_all(folder_loc,"/")[[1]])$end)-1]+1,
+                   data.frame(str_locate_all(folder_loc,"/")[[1]])$end[length(data.frame(str_locate_all(folder_loc,"/")[[1]])$end)]-1)
+
+files=list.files(folder_loc,pattern=".csv")
+
+#########################################################################
+#########################################################################
+## set folder where actiwatch files are stored
+folder_loc_lux=paste(working_dir,"temp_raw_data_w_lux/",sep="")
+
+folder_name_lux=substr(folder_loc_lux,
+                       data.frame(str_locate_all(folder_loc_lux,"/")[[1]])$end[length(data.frame(str_locate_all(folder_loc_lux,"/")[[1]])$end)-1]+1,
+                       data.frame(str_locate_all(folder_loc_lux,"/")[[1]])$end[length(data.frame(str_locate_all(folder_loc_lux,"/")[[1]])$end)]-1)
+
+#get a list of actiwatch files again
+files_lux=list.files(folder_loc_lux,pattern=".csv")
+#########################################################################################
+letter_space="[[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ ]]"
+
+num_criteria = "[[:digit:]]+"
+
+##load in diary wummary
+##for a template of what the diary summary looks like please refer to the folder 'data examples'
+diary_dates=tibble(read.csv(paste("diary_summary_8_23_2022.csv",sep="")))
+
+#load the functions that create the header data (saves time for the optimization)
+source(paste(working_dir,"header_script_for_github_7_13_2022.R",sep=""))
+
+##################################################################################
+##################################################################################
+header_dat=do.call("rbind",
+                   lapply(seq(from=1,
+                              to=length(files),
+                              by=1),
+                          header_fct))
+
+header_dat=header_dat %>% left_join(y=diary_dates %>%
+                                      mutate(ID=as.character(ID),
+                                             across(c("STARTWAT","STOPWAT","STARTMON","STOPMON"), ~as.Date(.x,format="%m/%d/%Y"))) %>%
+                                      select(ID,VISIT,STARTWAT,STOPWAT,STARTMON,STOPMON,TRNDT,SITE_ID),
+                                    by="ID")
+
+
+
+###########################################################################
+##################initiate data processing for predictions
+##########################################################################
+##this is a vector to be filled with any instances where a person does not have valid diary data
+diary_vector=c()
+
+
+##these dataframes will be filled by running the loop below (reference in the 'source' command)
+
+keep_id_df_w_lux=data.frame(ID="1",REAL_DATE=as.Date("2021-01-01",format="%Y-%m-%d"))
+
+keep_id_df_wo_lux=data.frame(ID="1",REAL_DATE=as.Date("2021-01-01",format="%Y-%m-%d"))
+
+activity_missing_df=tibble(data.frame(ID="1",REAL_DATE_EXT="1",
+                                      NUM_RUNS=0,LONGEST_RUN=0))
+
+whitelight_missing_df=tibble(data.frame(ID="1",REAL_DATE_EXT="1",
+                                        NUM_RUNS=0,LONGEST_RUN=0))
+
+#####################################################
+#####################################################
+
+source(paste(working_dir,'preprocessing_files_for_prediction_8_25_2022.R',sep=""))
+
+keep_id_df_w_lux=keep_id_df_w_lux %>% filter(ID!="1")
+keep_id_df_wo_lux=keep_id_df_wo_lux %>% filter(ID!="1")
+
+#an inventory of what ids/days had valid lux data and needed a prediction made
+saveRDS(keep_id_df_w_lux,paste(working_dir,subDir,"/keep_id_df_w_lux.RDS",sep=""))
+
+
+#an inventory of what ids/days did NOT have valid lux data and needed a prediction made
+saveRDS(keep_id_df_wo_lux,paste(working_dir,subDir,"/keep_id_df_without_lux.RDS",sep=""))
+
+## data frames with info regarding the 'length of missingness' so you can understand how/if imputation was applied to any missing lux data
+
+saveRDS(whitelight_missing_df %>% filter(ID!="1"),paste(working_dir,subDir,"/whitelight_missing_df.RDS",sep=""))
+
+saveRDS(activity_missing_df %>% filter(ID!="1"),paste(working_dir,subDir,"/activity_missing_df.RDS",sep=""))
+```
+
+
+
+
+
+```{python convert RDS to pickle again}
+import pandas as pd
+import stats
+import os
+from datetime import date
+import pathlib
+from os import listdir
+from os.path import isfile, join
+
+working_dir=r.working_dir
+
+current_date=pd.read_csv(working_dir + 'current_date_reference_tag.csv')['x'].iloc[0]
+
+
+
+##if not running this script at the same day as building the .RDS files you will need to add this date value manually
+
+#current_date="2022-04-28"
+
+#################################################################################
+####for data with lux############################################################
+#################################################################################
+
+keep_id_df = r.readRDS(working_dir + "/pred_date_"+current_date+'/keep_id_df_w_lux.RDS') 
+
+ids=keep_id_df.sort_values('ID').ID.unique()
+
+pathlib.Path(working_dir+"pred_date_"+current_date +'/with_lux/pickles').mkdir(parents=True, exist_ok=True) 
+
+for i in ids:
+    df = r.readRDS(working_dir+'pred_date_'+current_date+'/with_lux/'+i+'.RDS')  
+    df = pd.DataFrame(df)
+    df.to_pickle(working_dir+'pred_date_'+current_date+'/with_lux/pickles/' +i+'.pkl')
+
+#################################################################################
+##########for data without lux
+#################################################################################
+
+keep_id_df = r.readRDS(working_dir + "/pred_date_"+current_date+'/keep_id_df_without_lux.RDS') 
+
+ids=keep_id_df.sort_values('ID').ID.unique()
+
+pathlib.Path(working_dir+"/pred_date_"+current_date +'/without_lux/pickles/').mkdir(parents=True, exist_ok=True) 
+
+for i in ids:
+    df = r.readRDS(working_dir+'pred_date_'+current_date+'/without_lux/'+i+'.RDS')  
+    df = pd.DataFrame(df)
+    df.to_pickle(working_dir+'pred_date_'+current_date+'/without_lux/pickles/' +i+'.pkl')
+
+exit
+
+```
