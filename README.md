@@ -1,15 +1,26 @@
 #Workflow of the entire MASH procedure
+
 This document is meant to be a guide for running the scripts constituting the MASH procedure detailed in ‘Method for Activity Sleep Harmonization (MASH): Harmonizing data from two wearable devices to estimate 24-hr movement cycles’  
+
 Below is a description of each script.  The number of the script indicates the order that it should be run.  
 Before running the scripts please be advised of the following:
-a)	At the beginning of every script an object is created called ‘working_dir’.  For each script this should be set to the folder in which you would like everything to be saved/stored in.  It is assumed that the raw data files will be in this folder as well.  As you go through the steps there will be many new folders and files saved to this directory.  
+
+-a)	At the beginning of every script an object is created called ‘working_dir’.  For each script this should be set to the folder in which you would like     everything to be saved/stored in.  It is assumed that the raw data files will be in this folder as well.  As you go through the steps there will be many new folders and files saved to this directory.  
+
 a.	I would recommend downloading the entire repository on github into this folder
+
 b)	The raw actigraph data should be stored in a hard-coded folder called ‘temp_raw_data’.  The attached scripts make this assumption.
+
 c)	The raw actiwatch data should be stored in a hard-coded folder called ‘temp_raw_data_w_lux’.  The attached scripts make this assumption. 
+
 d)	The diary summary data has been hardcoded as ‘diary_summary.csv’
+
 e)	All of the Python scripts were run with version 3.9.7.  
+
 a.	All relevant packages can be found in the ‘requirements.txt’. 
+
 f)	Because we can’t share our data, I have provided templates of how each data table was formatted.  This can be found in the folder labelled ‘data_examples’.
+
 g)	There are 4 main folders that are created when running all of the scripts
 a.	‘raw_data_processed_’+current_date
 i.	This has all of the preliminary data summaries created in steps 1 and 2
