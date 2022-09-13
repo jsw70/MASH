@@ -150,7 +150,7 @@ header_dat=header_dat %>% left_join(y=diary_dates %>%
 ##load in the 'uncorrected' join of sleep-wake data
 ## we do this to keep only the data that was joined with valid diary data proceeding and preceding the day in question
 
-interval_dat=tibble(readRDS("L:/SWAN/data analysis/Analyst Folders/JF/projects/actigraphy/Colvin_5_21_2021/data/raw_data/JF_processed/tier_1_done/TIER_1_2022-05-05.Rda"))
+interval_dat=tibble(readRDS(paste(working_dir,"raw_data_processed_",current_date,"/TIER_1_",currend_date,".Rda",sep="")))
 
 interval_dat = interval_dat  %>% mutate(REAL_DATE=as.Date(STRDATE_ALT,format="%Y-%m-%d"),
                               PREV_END=as.POSIXct(PREV_END,tz="GMT"),
@@ -349,7 +349,7 @@ for i in ids:
     df = pd.DataFrame(df)
     df.to_pickle(working_dir+'raw_data_for_1D_CNN_'+current_date+'/pickles/' +i.replace('.RDS','')+'.pkl')
     
-exit
+exit()
 
 ```
 
@@ -404,7 +404,7 @@ raw.loc[:,'TAG']=raw.ID+'_'+raw.REAL_DATE_EXT
 ##########################################################
 pathlib.Path(r.working_dir+'python_batch_iteration_data/set_assignment_'+current_date+'/').mkdir(parents=True, exist_ok=True) 
 
-working_dir='L:/SWAN/data analysis/Analyst Folders/JF/projects/actigraphy/Colvin_5_21_2021/scripts/github/python_batch_iteration_data/set_assignment_'+current_date+'/'
+
 ####################################################################
 
 #####figure out id groupings beforehand
@@ -451,19 +451,19 @@ raw.groupby('wearing').wearing.count()
 #np.save('exclude_tags',exclude_tags)
 
 mm_axis1_scaler=sklearn.preprocessing.MinMaxScaler().fit(raw[(raw.GROUP=='TRAIN')][['Axis1']])
-joblib.dump(mm_axis1_scaler, working_dir + 'mm_axis1_scaler.save') 
+joblib.dump(mm_axis1_scaler, working_dir +'python_batch_iteration_data/set_assignment_'+current_date+'/'+ 'mm_axis1_scaler.save') 
 
 mm_axis2_scaler=sklearn.preprocessing.MinMaxScaler().fit(raw[(raw.GROUP=='TRAIN')][['Axis2']])
-joblib.dump(mm_axis2_scaler, working_dir+'mm_axis2_scaler.save') 
+joblib.dump(mm_axis2_scaler, working_dir +'python_batch_iteration_data/set_assignment_'+current_date+'/'+'mm_axis2_scaler.save') 
 
 mm_axis3_scaler=sklearn.preprocessing.MinMaxScaler().fit(raw[(raw.GROUP=='TRAIN')][['Axis3']])
-joblib.dump(mm_axis3_scaler,working_dir + 'mm_axis3_scaler.save') 
+joblib.dump(mm_axis3_scaler,working_dir +'python_batch_iteration_data/set_assignment_'+current_date+'/'+ 'mm_axis3_scaler.save') 
 
 mm_activity_scaler=sklearn.preprocessing.MinMaxScaler().fit(raw[(raw.GROUP=='TRAIN')][['Activity']])
-joblib.dump(mm_activity_scaler,working_dir + 'mm_activity_scaler.save') 
+joblib.dump(mm_activity_scaler,working_dir +'python_batch_iteration_data/set_assignment_'+current_date+'/'+ 'mm_activity_scaler.save') 
 
 mm_whitelight_scaler=sklearn.preprocessing.MinMaxScaler().fit(raw[(raw.GROUP=='TRAIN')][['WhiteLight']])
-joblib.dump(mm_whitelight_scaler,working_dir + 'mm_whitelight_scaler.save') 
+joblib.dump(mm_whitelight_scaler,working_dir +'python_batch_iteration_data/set_assignment_'+current_date+'/'+ 'mm_whitelight_scaler.save') 
 
 
 exit
