@@ -32,7 +32,7 @@ current_date=Sys.Date()
 ##this includes raw data, all scripts, etc
 ##obviously you can set things up whatever way you like, the code is structured this way for ease of use/communication
 
-working_dir="L:/SWAN/data analysis/Analyst Folders/JF/projects/actigraphy/Colvin_5_21_2021/scripts/github/"
+working_dir="enter working directory here"
 
 write.csv(current_date,paste(working_dir,"current_date_reference_tag.csv",sep=""),
           row.names=FALSE)
