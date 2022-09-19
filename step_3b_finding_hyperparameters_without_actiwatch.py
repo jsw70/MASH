@@ -45,7 +45,7 @@ from tensorflow.keras.optimizers import SGD, Adam,RMSprop
 from tensorflow.keras.callbacks import ModelCheckpoint
 import keras_tuner as kt
 
-working_dir="L:/SWAN/data analysis/Analyst Folders/JF/projects/actigraphy/Colvin_5_21_2021/scripts/github/"
+working_dir="enter working directory here"
 
 os.chdir(working_dir + 'python_batch_iteration_data/')
 
