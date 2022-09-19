@@ -22,7 +22,7 @@ use_virtualenv("H:/cnn_10_8_2021/",required=TRUE)
 
 pd=import("pandas")
 
-working_dir="L:/SWAN/data analysis/Analyst Folders/JF/projects/actigraphy/Colvin_5_21_2021/scripts/github/"
+working_dir="enter working directory here"
 
 
 current_date=read.csv(paste(working_dir,"current_date_reference_tag.csv",sep=""))
@@ -55,19 +55,11 @@ cutpoints_without_lux=cutpointr(data=pred_dat_without,x='PRED_AWAKE',class='WI',
 cutpoints_with_lux=cutpointr(data=pred_dat_with,x='PRED_AWAKE',class='WI',method=maximize_metric,metric=youden)
 
 
-saveRDS(cutpoints_without_lux, paste(working_dir,"pred_date_",current_date,"/youden_without_lux.RDS",sep=""))
+saveRDS(cutpoints_without_lux, paste(working_dir,"youden_without_lux.RDS",sep=""))
 
-saveRDS(cutpoints_with_lux, paste(working_dir,"pred_date_",current_date,"/youden_with_lux.RDS",sep=""))
+saveRDS(cutpoints_with_lux, paste(working_dir,"youden_with_lux.RDS",sep=""))
 
 
-# pred_dat_with=pred_dat_with %>% 
-#   mutate(PRED_CLASS=ifelse(PRED_AWAKE>=cutpoints_with_lux$optimal_cutpoint,1,0))
-# 
-# pred_dat_without=pred_dat_without %>% 
-#   mutate(PRED_CLASS=ifelse(PRED_AWAKE>=cutpoints_without_lux$optimal_cutpoint,1,0))
-# 
-# saveRDS(pred_dat_with,"L:/SWAN/data analysis/Analyst Folders/JF/projects/actigraphy/Colvin_5_21_2021/data/data_for_prediction/pred_date_2022-08-09/TEST_predictions_with_lux.RDS")
-# 
-# saveRDS(pred_dat_without,"L:/SWAN/data analysis/Analyst Folders/JF/projects/actigraphy/Colvin_5_21_2021/data/data_for_prediction/pred_date_2022-08-09/TEST_predictions_without_lux.RDS")
+
 
 ```
