@@ -19,7 +19,7 @@ library(haven)
 library(imputeTS)
 options(dplyr.width = Inf)
 
-working_dir="L:/SWAN/data analysis/Analyst Folders/JF/projects/actigraphy/Colvin_5_21_2021/scripts/github/"
+working_dir="enter working directory here"
 
 
 current_date=read.csv(paste(working_dir,"current_date_reference_tag.csv",sep=""))
@@ -105,7 +105,7 @@ num_criteria = "[[:digit:]]+"
 
 ##load in diary wummary
 ##for a template of what the diary summary looks like please refer to the folder 'data examples'
-diary_dates=tibble(read.csv(paste("diary_summary_8_23_2022.csv",sep="")))
+diary_dates=tibble(read.csv(paste("diary_summary_",current_date,".csv",sep="")))
 
 #load the functions that create the header data (saves time for the optimization)
 source(paste(working_dir,"header_script_for_github_7_13_2022.R",sep=""))
