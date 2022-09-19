@@ -19,7 +19,7 @@ library(haven)
 options(dplyr.width = Inf)
 library(imputeTS)
 
-working_dir="L:/SWAN/data analysis/Analyst Folders/JF/projects/actigraphy/Colvin_5_21_2021/scripts/github/"
+working_dir="enter working directory here"
 
 
 current_date=read.csv(paste(working_dir,"current_date_reference_tag.csv",sep=""))
@@ -51,9 +51,9 @@ diff_sample_fct=function(obj,i){
 #######################################
 
 ##load in youden info
-youden_with_lux=readRDS(paste(working_dir,"pred_date_",current_date,"/youden_with_lux.RDS",sep=""))
+youden_with_lux=readRDS(paste(working_dir,"youden_with_lux.RDS",sep=""))
 
-youden_without_lux=readRDS(paste(working_dir,"pred_date_",current_date,"/youden_without_lux.RDS",sep=""))
+youden_without_lux=readRDS(paste(working_dir,"youden_without_lux.RDS",sep=""))
 
 ##loading the epoch-level predictions
 
