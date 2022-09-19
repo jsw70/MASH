@@ -85,7 +85,8 @@ params = {
         'date_folder':'set_assignment_'+current_date,
         'build_vars':['Axis1','Axis2','Axis3','wearing','AFTERNOON','NIGHT'],
         'explode_vars':['Axis1','Axis2','Axis3','wearing'],
-        'working_directory':working_dir}
+        'working_directory':working_dir,
+        'cur_date':current_date}
 
 #####################################################################################33
 ######################################################################################################
